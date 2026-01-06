@@ -22,10 +22,13 @@ async def cs2_gsi(req: Request):
     
     print(data)
 
-    if data["auth"]["key1"] != "bigballskidsyettys": 
+    if data.get("auth", {}).get("key1") != "bigballskidsyettys":
         return {"ok": True}
     
-    currentHealth = data["player"]["state"]["health"]
+    currentHealth = data.get("player", {}).get("state", {}).get("health")
+
+    if currentHealth is None:
+        return {"ok": True}
 
     if currentHealth != prevHealth or prevHealth is None:
         prevHealth = currentHealth
