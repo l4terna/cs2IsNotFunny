@@ -1,4 +1,5 @@
 venv
 build
+dist
 *.spec
-dist/*.mp3
+.env

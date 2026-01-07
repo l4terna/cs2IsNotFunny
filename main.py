@@ -7,12 +7,25 @@ import uvicorn
 import os, sys
 import winreg
 import shutil
-
+import random
 
 
 app = FastAPI()
 
 prevHealth = None
+voiceChannel = None
+voice_lock = asyncio.Lock()
+
+
+MUSIC_VOL = 0.25
+MUSIC_DUCK = 0.2
+VOICE_VOL = 0.6
+
+pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+pygame.mixer.set_num_channels(8)
+
+VOICE_CH = pygame.mixer.Channel(0) 
+
 
 @app.post("/cs2")
 async def cs2_gsi(req: Request):
@@ -29,8 +42,11 @@ async def cs2_gsi(req: Request):
 
     if currentHealth is None:
         return {"ok": True}
+    
+    providerSteamid = data.get("provider", {}).get("steamid", {})
+    playerSteamid = data.get("player", {}).get("steamid", {})
 
-    if currentHealth != prevHealth or prevHealth is None:
+    if providerSteamid == playerSteamid and currentHealth != prevHealth or prevHealth is None:
         prevHealth = currentHealth
 
         if currentHealth == 0:
@@ -40,35 +56,64 @@ async def cs2_gsi(req: Request):
     return {"ok": True}
 
 
+async def safe_remove(path: str):
+    for _ in range(10):
+        try:
+            os.remove(path)
+            return
+        except PermissionError:
+            await asyncio.sleep(0.1)
+        except FileNotFoundError:
+            return
+
 async def play_zen_quote_and_music():
-    async with httpx.AsyncClient(timeout=10) as client:
-        quoteRes = await client.get(
-            "http://api.forismatic.com/api/1.0/",
-            params={"method": "getQuote", "format": "json", "lang": "ru"},
+    if voice_lock.locked():
+        return
+
+    async with voice_lock:
+        async with httpx.AsyncClient(timeout=10) as client:
+            quoteRes = await client.get(
+                "http://api.forismatic.com/api/1.0/",
+                params={"method": "getQuote", "format": "json", "lang": "ru"},
+            )
+        quoteData = quoteRes.json()
+        
+        text = f'{quoteData.get("quoteText","")}. {quoteData.get("quoteAuthor","")}'.strip()
+
+        communicate = edge_tts.Communicate(
+            text,
+            voice="ru-RU-DmitryNeural",
+            rate="-25%",
+            pitch="-8Hz",
         )
-    quoteData = quoteRes.json()
+        await communicate.save("quote.mp3")
 
-    communicate = edge_tts.Communicate(f"{quoteData["quoteText"]}. {quoteData["quoteAuthor"]}", voice="ru-RU-DmitryNeural", rate="-25%", pitch="-8Hz")
-    await communicate.save("quote.mp3")
+        zenNumber = random.randint(1, 3)
+        pygame.mixer.music.load(resource_path(f"music/zen{zenNumber}.mp3"))
+        pygame.mixer.music.set_volume(MUSIC_VOL)
+        pygame.mixer.music.play(-1) 
 
-    pygame.mixer.init()
-    pygame.mixer.music.load(resource_path("zen.mp3"))
-    pygame.mixer.music.set_volume(0.15)
-    pygame.mixer.music.play()
-    
-    voice = pygame.mixer.Sound("quote.mp3")
-    channel = voice.play()
+        pygame.mixer.music.set_volume(MUSIC_DUCK)
 
-    while channel.get_busy():
-        await asyncio.sleep(0.1)
+        voice = pygame.mixer.Sound("quote.mp3")
+        VOICE_CH.set_volume(VOICE_VOL)
+        VOICE_CH.play(voice)
 
-    pygame.mixer.music.fadeout(2000)
+        while VOICE_CH.get_busy():
+            await asyncio.sleep(0.05)
+
+        pygame.mixer.music.set_volume(MUSIC_VOL)
+        pygame.mixer.music.fadeout(1500)
+
+        del voice
+        await asyncio.sleep(0.15)
+        await safe_remove("quote.mp3")
 
 
 def resource_path(rel: str) -> str:
-    base = getattr(sys, "_MEIPASS", os.path.dirname(sys.argv[0]))
-    return os.path.join(base, rel)
-
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(sys.argv[0])))
+    rel = rel.lstrip("/\\")
+    return os.path.normpath(os.path.join(base, rel))
 
 def find_cs2_cfg_path() -> str | None:
     try:
@@ -100,6 +145,7 @@ def insert_cfg():
     if not os.path.exists(cfgFilePath):
         shutil.copy(resource_path("gamestate_integration_laterna.cfg"), cfgFilePath)
     
+
 
 if __name__ == "__main__":
     insert_cfg()
