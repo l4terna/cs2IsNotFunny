@@ -8,7 +8,8 @@ import os, sys
 import winreg
 import shutil
 import random
-
+import re
+from typing import Optional, List
 
 app = FastAPI()
 
@@ -115,21 +116,68 @@ def resource_path(rel: str) -> str:
     rel = rel.lstrip("/\\")
     return os.path.normpath(os.path.join(base, rel))
 
-def find_cs2_cfg_path() -> str | None:
+def get_steam_path() -> Optional[str]:
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as k:
             steamPath, _ = winreg.QueryValueEx(k, "SteamPath")
+            steamPath = steamPath.replace("/", "\\")
+            return steamPath
     except FileNotFoundError:
         return None
 
-    steamPath = steamPath.replace("/", "\\")
-    libraries = [steamPath]
+def read_steam_libraries(steam_path: str) -> List[str]:
+    libs = []
+    if steam_path:
+        libs.append(os.path.normpath(steam_path))
+
+    vdf_path = os.path.join(steam_path, "steamapps", "libraryfolders.vdf")
+    if not os.path.isfile(vdf_path):
+        return list(dict.fromkeys(libs))
+
+    try:
+        raw = open(vdf_path, "r", encoding="utf-8", errors="ignore").read()
+    except OSError:
+        return list(dict.fromkeys(libs))
+
+    paths = set()
+
+    for m in re.finditer(r'"\s*path\s*"\s*"([^"]+)"', raw, flags=re.IGNORECASE):
+        p = m.group(1).replace("/", "\\")
+        paths.add(os.path.normpath(p))
+
+    for m in re.finditer(r'"\s*\d+\s*"\s*"([^"]+)"', raw):
+        p = m.group(1).replace("/", "\\")
+        p = os.path.normpath(p)
+
+        if os.path.isdir(os.path.join(p, "steamapps")):
+            paths.add(p)
+
+    for p in sorted(paths):
+        libs.append(p)
+
+    libs = list(dict.fromkeys(libs))
+    return libs
+
+def find_cs2_cfg_path() -> Optional[str]:
+    steam_path = get_steam_path()
+    if not steam_path:
+        return None
+
+    libraries = read_steam_libraries(steam_path)
+
+    common_rel = os.path.join("steamapps", "common")
+    candidates = [
+        "Counter-Strike Global Offensive", 
+        "Counter-Strike 2",                
+    ]
 
     for lib in libraries:
-        csPath = os.path.join(lib, "steamapps", "common", "Counter-Strike Global Offensive")
-        cfgPath = os.path.join(csPath, "game", "csgo", "cfg")
-        if os.path.isdir(cfgPath):
-            return cfgPath
+        common_dir = os.path.join(lib, common_rel)
+        for folder in candidates:
+            cs_root = os.path.join(common_dir, folder)
+            cfg_path = os.path.join(cs_root, "game", "csgo", "cfg")
+            if os.path.isdir(cfg_path):
+                return cfg_path
 
     return None
 
